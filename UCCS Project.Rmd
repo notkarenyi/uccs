@@ -1,0 +1,562 @@
+---
+title: "UCCS Project"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(maps)
+library(RColorBrewer)
+```
+
+## Load data
+
+```{r}
+nssa <- read.csv("NSSA.csv")
+```
+
+## Clean data
+
+```{r}
+# New column names
+new_names <- data_frame("title", "mission", "mission1", "description", 
+                        "type", "type2", "hq_location", "op_location", 
+                        "website", "model", "year", "subject", "subject2", 
+                        "grades", "languages", "languages2", "tutor", "tutor2", 
+                        "mode", "tutor_second_lang", "tutor_race", "n_students", 
+                        "minutes", "freq", "length", "ratio", "ratio_program", 
+                        "setting", "family_engage", "family_engage2", "rct", 
+                        "rct_cite", "rct_effect", "qed", "qed_cite", "qed_size", 
+                        "customer", "cost_school", "cost_student", "contact")
+
+colnames(nssa) <- new_names
+
+# Cost to students
+free <- c("^[Ff]ree$", "\\$0", "[Nn]/[Aa]", "[Nn]one", "0", "[Ff]ree to students")
+nssa_free <- nssa %>%
+  filter(str_detect(cost_student, paste(free, collapse = "|"))) %>%
+  unique() %>%
+  pull(cost_student)
+
+varies <- c("[Ff]ree for", "for free")
+nssa_varies <- nssa %>%
+  filter(str_detect(cost_student, paste(varies, collapse = "|"))) %>%
+  unique() %>%
+  pull(cost_student)
+
+cost <- c("[Vv]aries", "/hour", "/month", "[Pp]er", "/hr")
+nssa_cost <- nssa %>%
+  filter(str_detect(cost_student, paste(cost, collapse = "|"))) %>%
+  unique() %>%
+  pull(cost_student)
+
+lvls <- c(nssa_free, nssa_varies, nssa_cost, "")
+lbls <- c(rep("free", length(nssa_free)), 
+          rep("mostly free", length(nssa_varies)), 
+          rep("cost", length(nssa_cost)),
+          "na"
+          )
+
+nssa2 <- nssa %>%
+  mutate(cost_student = factor(cost_student, lvls, lbls))
+
+# unique(nssa$cost_student)
+# 
+# all <- c(cost, varies, free, "")
+# nssa %>%
+#   filter(str_detect(cost_student, paste(all, collapse = "|"), negate = TRUE)) %>%
+#   select(cost_student)
+
+nssa2 <- nssa2 %>%
+  mutate_at(c("rct", "qed"), ~case_when(. == "No" ~ 0,
+                                        . == "Yes" ~ 1))
+
+# Number of students
+nssa2 <- nssa2 %>%
+  mutate(n_students = str_replace(n_students, "\\+|,", "")) %>%
+  mutate(n_students = as.integer(n_students))
+
+# Model
+unique(nssa2$model)
+
+# Clean up effects
+nssa2 <- nssa2 %>%
+  mutate(rct_effect = str_replace(rct_effect, "(\\d),(\\d)", "\\1.\\2"),
+         rct_effect = str_extract(rct_effect, "(\\d){0,1}\\.(\\d){1,3}"),
+         rct_effect = as.double(rct_effect))
+
+# Code tutor type
+nssa2 <- nssa2 %>%
+  mutate(tutor = paste(tutor, tutor2, sep = ", ")) %>%
+  select(-tutor2) %>%
+  mutate(pro = str_detect(tutor, "Paraprofessional|[Tt]eacher|Tutoring Staff|professional"),
+         volunteer = str_detect(tutor, "[Ss]tudent|Volunteer|graduates"),
+         peer = str_detect(tutor, "Peer"),
+         other = str_detect(tutor, "AI|program"))
+```
+
+```{r include=FALSE}
+nssa2$description
+```
+
+## Creating a composite HIT score
+
+The Annenberg Institute evaluates whether programs maximize their service through "high-impact tutoring" using the following characteristics (Robinson, Kraft, Loeb, & Schueler, 2021):
+
+1. Frequency (3 or more sessions per week)
+1. Group size (1-4 students per session)
+1. Personnel (ongoing support and training)
+1. Alignment (high-quality materials coordinated with school curriculum)
+1. Scheduling (during the school day)
+1. Measurement (ongoing, informal, formative assessments)
+1. Relationships (maintaining consistent tutors over time)
+1. Prioritization (programs that target all students reduce stigma)
+
+They also state that both in-person and online delivery can be effective, and that current research shows positive effects for early reading interventions and secondary math interventions. I do not include these criteria in the evaluation because they are ambiguous.
+
+Using the NSSA data, I can create measures for some of these characteristics:
+1. Programs reported number of sessions per week. A `frequency` of 3 or greater will be given a score of 1; less than 3 will be given a score of 0.
+1. Programs reported student:tutor ratio. A `ratio` less than 0.20 will be given a score of 1; more than 1 will be given a score of 0. Ratios that are unspecified (e.g. "small group") will be counted as 0.
+1. Programs reported whether sessions took place in school or out of school. A `setting` of "During School" will be given a score of 1; "Out of School" will be given a score of 0.
+
+No data is currently available for personnel, alignment, measurement, relationships, or prioritization. The sum of the preceding variables will serve as a crude composite. 
+
+SPARK Early Literacy explicitly addresses prioritization. City Year's AmeriCorps addresses alignment and relationships. TutorChat addresses relationships. Masteryhour.org addresses personnel. eTutorWorld addresses personnel. EdLight addresses alignment. Some programs hint at some characteristics of HIT but do not specify exactly what they mean.
+
+Some organizations seem to not involve tutors at all, but are AI-powered edtech products. One listing is for an individual tutor.
+
+```{r}
+# ifelse(str_detect(ratio, "4:1|1:4|3:1|1:3|2:1|1:2|1:1|1:01"), 1, 0)
+# "(\\d{1,2}):(\\d{1,2})"
+# "\\1/\\2"
+
+nssa2 <- nssa2 %>%
+  mutate(setting = as.double(as.character(factor(setting, unique(setting), c(0,.5,1, NA)))),
+         ratio = ifelse(str_detect(ratio, "5:1|[Ss]mall group|6:01|8:1|1:5|20:1"), 0, 1),
+         freq = ifelse(freq >= 3, 1, 0), 
+         )
+
+temp <- c("setting", "ratio", "freq")
+
+nssa2$comp <- rowSums(nssa2[temp], na.rm = TRUE)  
+
+nssa2$wtcomp <- nssa2 %>%
+  mutate(freq = 2 * freq) %>%
+  select(temp) %>%
+  rowSums(na.rm = TRUE)
+```
+
+## Creating a composite "eval" score
+
+```{r}
+nssa2$eval <- nssa2 %>%
+  select(qed, rct) %>%
+  rowSums(na.rm = TRUE)
+
+nssa2 <- nssa2 %>%
+  mutate(eval = factor(eval, levels = c(0, 1, 2), labels = c(0, 1, 1)))
+```
+
+## Exploring relationships
+
+
+```{r}
+# Graph objects
+text_size <- theme(text = element_text(size = 18),
+        plot.title = element_text(size = 18, face = "bold"))
+
+c1 <- "royalblue1"
+c2 <- "plum2"
+
+jitter <- geom_jitter(width = 0.2, height = 0.2)
+
+blue_bar <- list(geom_bar(fill = c1),
+                 text_size,
+                 theme(legend.title = element_blank(),
+                        panel.grid.major.y = element_blank(),
+                        axis.ticks.y = element_blank()))
+  
+pink_blue <- list(coord_flip(), 
+                  text_size,
+                  scale_fill_manual(values = c(c2, c)),
+                  theme(panel.grid.major.y = element_blank(),
+                        panel.grid.major.x = element_line(color = "gray70"),
+                        panel.background = element_blank(),
+                        legend.title = element_blank(),
+                        axis.ticks.x = element_blank(),
+                        axis.ticks.y = element_blank(),
+                        axis.text.y = element_text(size = 18, color = "black")))
+```
+
+
+
+```{r}
+nssa2 %>%
+  group_by(cost_student) %>%
+  ggplot(aes(cost_student)) +
+  geom_bar()
+
+nssa2 %>%
+  mutate(volunteer = str_detect(tutor, "[Vv]olunteer")) %>%
+  ggplot(aes(volunteer, cost_student)) +
+  jitter
+
+student_led <- c("student-led", "student-run", "undergraduate", "college", "young adults")
+nssa2 %>%
+  mutate(student_led = str_detect(description, paste(student_led, collapse = "|"))) %>%
+  mutate(volunteer = str_detect(tutor, "[Vv]olunteer")) %>%
+  ggplot(aes(student_led, volunteer)) +
+  jitter
+
+nssa2 %>%
+  mutate(volunteer = str_detect(tutor, "[Vv]olunteer")) %>%
+  filter(!is.na(n_students)) %>%
+  filter(n_students < 500000) %>%
+  ggplot(aes(n_students, volunteer)) +
+  jitter
+```
+
+```{r}
+# RCT versus profit model
+nssa2 %>%
+  filter(rct != "") %>%
+  filter(model != "") %>%
+  ggplot(aes(rct, model)) +
+  jitter
+
+nssa2 %>%
+  filter(rct != "") %>%
+  filter(model != "") %>%
+  ggplot(aes(model)) +
+  geom_bar(aes(fill = rct), position = "dodge", width = 0.5)
+```
+
+## Quantitative analysis
+
+How many programs meet how many HIT criteria?
+
+[Clustered bar chart](https://stackoverflow.com/questions/22305023/how-to-get-a-barplot-with-several-variables-side-by-side-grouped-by-a-factor) from Stack Overflow.
+
+```{r include=FALSE}
+nssa2 %>%
+  mutate(comp = ceiling(comp),
+         freq = factor(freq, levels = c(0,1), labels = c("no", "yes"))) %>%
+  ggplot(aes(comp)) +
+  geom_bar(aes(fill = freq))
+
+nssa2 %>%
+  mutate(comp = ceiling(wtcomp),
+         freq = factor(freq, levels = c(0,1), labels = c("no", "yes"))) %>%
+  ggplot(aes(comp)) +
+  geom_bar(aes(fill = pro), position = "dodge")
+
+nssa2 %>%
+  mutate(comp = ceiling(wtcomp),
+         freq = factor(freq, levels = c(0,1), labels = c("no", "yes"))) %>%
+  ggplot(aes(comp)) +
+  geom_bar()
+
+nssa2 %>%
+  mutate(freq = factor(freq, levels = c(0,1), labels = c("Less than 3", "3 or more"))) %>%
+  ggplot(aes(freq)) +
+  geom_bar(fill = c1) +
+  xlab("Session frequency (per week)") +
+  ylab("N") +
+  text_size +
+  ggtitle("Fig. 4.1: Many programs do not follow the recomm-\nended session frequency for high-impact tutoring")
+
+nssa2 %>%
+  ggplot(aes(comp, comp)) +
+  geom_jitter(aes(color = as.logical(ratio), shape = as.logical(freq), size = setting), width = 1, height = 1) +
+  scale_size_continuous(breaks = c(0, 0.5, 1), range = c(1, 5)) +
+  text_size +
+  ggtitle("Fig. 4: Many programs do not follow the recommended\nsession frequency for high-impact tutoring")
+
+nssa2 %>%
+  filter(!is.na(setting)) %>%
+  ggplot(aes(comp)) +
+  geom_bar(aes(fill = as.logical(ratio)),
+           position = "dodge") +
+  facet_grid(freq ~ ceiling(setting))
+
+nssa2 %>%
+  select(comp, freq, setting, ratio) %>%
+  mutate(setting = ceiling(setting), comp = ceiling(comp)) %>%
+  arrange(comp, freq, setting, ratio)
+```
+
+[Label wrapping](https://stackoverflow.com/questions/21878974/wrap-long-axis-labels-via-labeller-label-wrap-in-ggplot2) from Stack Overflow.
+
+The final graph:
+
+```{r fig4}
+nssa2 %>%
+  select(freq, setting, ratio) %>%
+  
+  # We need to get frequency, setting, and ratio (3 HIT criteria) into one variable for graphing
+  
+  pivot_longer(c(freq, setting, ratio)) %>%
+  
+  # Clean the NA values out of the setting variable, and round up to give programs the benefit of the doubt
+  
+  mutate(value = as.logical(ceiling(value))) %>%
+  filter(!is.na(value)) %>%
+  group_by(name) %>%
+  mutate(tot = n()) %>%
+  ungroup() %>%
+  group_by(name, value) %>%
+  summarize(prop = n()/tot * 100) %>%
+  
+  # For some reason there are many duplicate rows when I try to use an unretained variable in summarize()
+  
+  unique() %>%
+  
+  # Actual graph
+  
+  ggplot(aes(name, prop)) +
+  geom_bar(aes(fill = value), stat = "identity", width = 0.75) +
+  
+  # Labels and aesthetics for final presentation
+  
+  pink_blue +
+  xlab("") +
+  ylab("Percentage of programs") +
+  scale_x_discrete(labels = str_wrap(c("3 or more sessions per week", 
+                                       "Tutor:student ratio of at least 1:4", 
+                                       "Sessions held during school"), 
+                                     width = 18)) +
+  scale_y_continuous(limits = c(0, 100)) +
+
+  # Possible captions: "U.S. tutoring programs\nare not organized for best\nstudent outcomes"
+                    # "How organizations measure up to recommendations for high-impact tutoring"
+                    # "Percentage of organizations fulfilling independent recommendations for high-impact tutoring"
+                    #
+  
+  ggtitle("Fig. 4: Percentage of programs\nemploying tutoring best practices")
+```
+
+
+If your program is high-quality, are you more likely to have been evaluated in an RCT?
+
+```{r fig1}
+vlines <- nssa2 %>%
+  filter(rct != "") %>%
+  mutate(eval = factor(rct, levels = unique(rct), labels = c("Not studied", "Studied"))) %>%
+  group_by(rct) %>%
+  summarize(avg = mean(comp))
+
+nssa2 %>%
+  filter(rct != "") %>%
+  mutate(eval = factor(rct, levels = unique(rct), labels = c("Not studied", "Studied")),
+         comp = ceiling(comp)) %>%
+  ggplot(aes(comp, ..prop..)) +
+  blue_bar +
+  facet_wrap(~rct) +
+  geom_vline(data = vlines, aes(xintercept = avg), linetype = "dashed", size = 1.5) +
+  xlab("Program quality") +
+  ylab("Proportion of organizations") +
+  ggtitle("Fig. 1: Programs that researchers have chosen to study\nare not significantly higher quality, p=0.10")
+
+t.test(nssa2$comp[nssa$rct == "Yes"], mu = 1.70)
+```
+
+What about either RCT or QED?
+
+```{r fig1v2}
+vlines <- nssa2 %>%
+  filter(!is.na(eval)) %>%
+  mutate(eval = factor(eval, levels = unique(eval), labels = c("Not studied", "Studied"))) %>%
+  group_by(eval) %>%
+  summarize(avg = mean(comp))
+
+nssa2 %>%
+  filter(!is.na(eval)) %>%
+  mutate(eval = factor(eval, levels = unique(eval), labels = c("Not studied", "Studied")),
+         comp = ceiling(comp)) %>%
+  ggplot(aes(comp, ..prop..)) +
+  blue_bar  +
+  facet_wrap(~eval) +
+  geom_vline(data = vlines, aes(xintercept = avg), linetype = "dashed", size = 1.5) +
+  xlab("Program quality") +
+  ylab("Proportion of organizations") +
+  ggtitle("Fig. 1: Programs that researchers have chosen to study\nare not significantly higher quality, p=0.06")
+
+t.test(nssa2$comp[nssa2$eval == 1], mu = 1.5)
+```
+
+What is the effect size of the RCTs?
+
+```{r}
+nssa2 %>%
+  ggplot(aes(rct_effect)) +
+  geom_histogram(bins = 10)
+
+nssa2 %>%
+  mutate(pro = factor(pro, levels = c(TRUE, FALSE), labels = c("Professional", "Volunteer")),
+         effect = ) %>%
+  ggplot(aes(rct_effect)) +
+  geom_histogram(bins = 4, fill = c1) +
+  facet_grid(~pro) +
+  xlab("Effect (SD)") +
+  ylab("N")
+
+nssa2 %>%
+  select(rct_effect, pro) %>%
+  filter(rct_effect != "")
+```
+
+If your program is mostly volunteer-based, are you less likely to be evaluated? Conversely, if your program is professionally run, are you more likely to be evaluated?
+
+```{r fig3}
+nssa2 %>%
+  ggplot(aes(eval)) +
+  geom_bar(aes(fill = volunteer), position = "fill")
+
+nssa2 %>%
+  ggplot(aes(eval)) +
+  geom_bar(aes(fill = peer))
+
+nssa2 %>%
+  ggplot(aes(eval)) +
+  geom_bar(aes(fill = other))
+
+nssa2 %>%
+  ggplot(aes(pro, eval)) +
+  jitter
+
+nssa2 %>%
+  mutate(pro = factor(pro, levels = c(TRUE, FALSE), labels = c("Professional", "Volunteer")),
+         eval = factor(eval, levels = c(0, 1), labels = c("Not studied", "Studied"))) %>%
+  ggplot(aes(pro)) +
+  geom_bar(aes(fill = eval), width = 0.5) +
+  pink_blue +
+  xlab("") +
+  ylab("N") +
+  ggtitle("Fig. 3. Researchers are significantly less likely\nto study programs staffed by volunteers,\np<0.01")
+
+chisq.test(table(nssa2$pro, nssa2$eval))
+```
+
+Do volunteer-staffed programs meet HIT criteria?
+
+```{r fig2}
+vlines <- nssa2 %>%
+  mutate(pro = factor(pro, levels = c(TRUE, FALSE), labels = c("Professional tutors", "Volunteer tutors"))) %>%
+  group_by(pro) %>%
+  summarize(avg = mean(comp))
+
+nssa2 %>%
+  mutate(pro = factor(pro, levels = c(TRUE, FALSE), labels = c("Professional tutors", "Volunteer tutors")),
+         comp = ceiling(comp)) %>%
+  ggplot(aes(comp, ..prop..)) +
+  blue_bar +
+  facet_grid(~pro) +
+  geom_vline(data = vlines, aes(xintercept = avg), linetype = "dashed", size = 1.5) +
+  xlab("Program quality") +
+  ylab("Proportion of organizations") +
+  ggtitle("Fig. 2: Programs staffed by volunteers are significantly\n lower quality, p<0.01")
+
+t.test(nssa2$comp[nssa2$pro == TRUE], mu = 1.41)
+```
+
+
+### Location
+
+I also want to check that the sample of organizations is at least relatively representative. I wanted to make a map, but it looks like I'll need to finagle with the data before being able to map anything, due to the odd collection format.
+
+```{r, include=FALSE}
+abbr <- data.frame(c("Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming"),
+           c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"))
+names(abbr) <- c("state", "abbreviation")
+
+nssa3 <- nssa2 %>%
+  separate(hq_location, sep = ", ", into = c("city", "state"))
+
+for(i in seq_along(nssa3$state)) {
+  if (nssa3$state[i] %in% abbr$state) {
+    j <- which(abbr$state %in% nssa3$state[i])
+    nssa3$state[i] <- abbr$abbreviation[j]
+  }
+}
+
+# fix a typo
+nssa3 <- nssa3 %>%
+  mutate(state = replace(state, which(state == "Illionis"), "IL"))
+
+nssa3 <- nssa3 %>%
+  mutate(hq_location = paste(city, state, sep = " ")) %>%
+  mutate(hq_location = replace(hq_location, which(hq_location == "Washington DC NA"), "WASHINGTON DC"))
+
+# adding map coordinate data
+
+us.cities <- us.cities %>%
+  mutate(hq_location = name)
+
+nssa3 <- left_join(nssa3, us.cities, by = "hq_location")
+```
+
+Now we can actually start plotting.
+
+```{r}
+state <- map_data("state") 
+
+ggplot() +
+  geom_polygon(data = state, aes(long, lat, group = group), fill = "white", color = "#d6d6d6", size = 1) +
+  geom_count(aes(nssa3$long[!is.na(nssa3$long)], nssa3$lat[!is.na(nssa3$lat)]), alpha = 0.7, color = c1) +
+  scale_size_continuous(range = c(4, 12), breaks = seq(1, 12, by = 3)) +
+  xlab("") +
+  ylab("") +
+  theme(text = element_text(size = 18),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = "#d6d6d6"), 
+        axis.line = element_line(color = "white"),
+        axis.ticks = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        legend.key = element_blank(),
+        legend.position = c(0.9, 0.25)) +
+  labs(size = "n")
+
+ops <- str_split(nssa2$op_location, ", ") %>%
+  unlist() %>%
+  tolower()
+
+ops <- data.frame(ops) %>%
+  mutate(region = ops) %>%
+  group_by(region) %>%
+  summarize(n = n())
+
+state <- left_join(state, ops)
+
+ggplot() +
+  geom_polygon(data = state, aes(long, lat, group = group, fill = n), color = "grey93", size = 1) +
+  scale_fill_gradient2(low = "plum3", 
+                       mid = c,
+                       high = "royalblue4",
+                       midpoint = 17) +
+  xlab("") +
+  ylab("") +
+  text_size +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_line(color = "white"),
+        axis.ticks = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        legend.key = element_blank(),
+        legend.background = element_blank(),
+        legend.position = c(0.9, 0.25)) +
+  labs(size = "n")
+```
+
+Map organizations against population per state.
+
+Also, don't forget Alaska and Hawaii.
+
+Try to look at location disaggregated by staffing and best practices. Virtual organizations too.
+
+Try analyses again, but omitting virtual organizations.
+
+See whether virtual organizations have been researched.
